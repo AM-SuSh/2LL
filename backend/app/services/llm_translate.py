@@ -22,20 +22,29 @@ class LlmTranslateError(Exception):
     pass
 
 
-def _should_mock() -> bool:
+def _should_mock(api_key_override: str = "", force_mock: bool = False) -> bool:
+    if force_mock:
+        return True
     mode = (_settings.llm_translate_mode or os.getenv("LLM_TRANSLATE_MODE", "")).lower()
     if mode in ("mock", "1", "true", "yes"):
         return True
-    if not (_settings.openai_api_key or os.getenv("OPENAI_API_KEY", "")).strip():
+    if not (api_key_override or _settings.openai_api_key or os.getenv("OPENAI_API_KEY", "")).strip():
         return True
     return False
 
 
-async def translate_zh_to_en(text: str) -> Tuple[str, bool]:
+async def translate_zh_to_en(
+    text: str,
+    *,
+    api_key_override: str = "",
+    base_url_override: str = "",
+    model_override: str = "",
+    force_mock: bool = False,
+) -> Tuple[str, bool]:
     """
     Returns (english_text, used_mock).
     """
-    if _should_mock():
+    if _should_mock(api_key_override=api_key_override, force_mock=force_mock):
         lines = text.strip().splitlines()
         preview = "\n".join(lines[:8])
         suffix = "\n\n...(demo: configure OPENAI_API_KEY to use real LLM)" if len(lines) > 8 else ""
@@ -44,11 +53,13 @@ async def translate_zh_to_en(text: str) -> Tuple[str, bool]:
             True,
         )
 
-    key = (_settings.openai_api_key or os.getenv("OPENAI_API_KEY", "")).strip()
-    base = (_settings.openai_base_url or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")).rstrip(
-        "/"
-    )
-    model = _settings.openai_model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+    key = (api_key_override or _settings.openai_api_key or os.getenv("OPENAI_API_KEY", "")).strip()
+    base = (
+        base_url_override
+        or _settings.openai_base_url
+        or os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    ).rstrip("/")
+    model = (model_override or _settings.openai_model or os.getenv("OPENAI_MODEL", "gpt-4o-mini")).strip()
 
     url = f"{base}/chat/completions"
     payload = {

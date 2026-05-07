@@ -1,6 +1,6 @@
 # 双栏中英 Markdown 编辑器
 
-左栏中文、右栏英文的 Web 编辑器，支持一键 LLM 翻译填充，以及导出 Markdown 与 PDF。
+左栏中文、右栏英文的 Web 端 md编辑器，支持一键 LLM 翻译填充，以及导出PDF。
 
 ## 结构
 
@@ -13,9 +13,7 @@
 
 ```bash
 cd backend
-python -m venv .venv
-# Windows:
-.venv\Scripts\activate
+conda create -n 2ll python=3.9
 pip install -r requirements.txt
 copy .env.example .env   # 按需填写 API Key
 uvicorn app.main:app --reload --port 8000
@@ -36,14 +34,15 @@ npm run dev
 ## 功能
 
 - 双栏独立编辑，内容可自动保存到浏览器 `localStorage`
-- **LLM 翻译填充**：将中文栏内容翻译后写入英文栏
-- **导出 MD**：双语 Markdown 文件下载
-- **导出 PDF**：基于预览区域生成 PDF（A4 大致分页）
+- **LLM 翻译填充**：将中文栏内容翻译后写入英文栏（调试中）
+- **预览页面**：双语 PDF 文件预览
+- **导出 PDF**：基于预览区域生成 PDF 文件
+- **同步滚动**：对齐中英文两栏同步滚动
 
-## 生产构建
+## 优化计划
 
-```bash
-cd frontend && npm run build
-```
+- 支持未编辑完文件保存到本地
+- 支持导入本地md存储文件列表
+- 优化图片插入逻辑
+- 支持公式等内容插入
 
-将 `frontend/dist` 交由静态服务器托管；生产环境需将 API 基础地址配置为实际后端（见 `frontend/.env.production.example`）。
