@@ -12,16 +12,22 @@ html {
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow-x: clip;
 }
 
 body {
   margin: 0;
   color: #1a1d26;
-  background: #f4f6fa;
+  background: linear-gradient(180deg, #f8fafc 0%, #f3f6fb 100%);
+  overflow-x: hidden;
 }
 
 /* ========== CSS Variables ========== */
 :root {
+  --toolbar-min-h: 124px;
+  --toolbar-pad-y: 14px;
+  --toolbar-pad-x: 20px;
+
   --bg-base: #f4f6fa;
   --bg-elevated: #ffffff;
   --bg-subtle: #f8f9fc;
@@ -79,19 +85,43 @@ body {
 
 /* ========== Toolbar / Navbar ========== */
 .toolbar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 14px 20px;
-  border: 1px solid var(--border-light);
-  border-radius: var(--radius-xl);
-  background: var(--bg-elevated);
-  box-shadow: var(--shadow-md);
-  backdrop-filter: blur(8px);
+  position: sticky;
+  top: 0;
+  z-index: 1000;
+  flex-shrink: 0;
+  width: 100vw;
+  margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
+  left: 0;
+  box-sizing: border-box;
+  padding: 0;
+  border: none;
+  border-bottom: 1px solid var(--border-light);
+  border-radius: 0;
+  background: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 4px 24px rgba(15, 23, 42, 0.06);
+  backdrop-filter: blur(12px);
 }
 
-.toolbar--rich {
+.toolbar__inner {
+  margin: 0 auto;
+  width: 100%;
+  max-width: 1640px;
+  min-height: var(--toolbar-min-h);
+  padding: var(--toolbar-pad-y) var(--toolbar-pad-x);
+  box-sizing: border-box;
+  display: flex;
   flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  gap: 12px 16px;
+}
+
+.appShell--preview .toolbar__inner {
+  max-width: 1840px;
+}
+
+.toolbar--rich .toolbar__inner {
   row-gap: 12px;
 }
 
@@ -163,6 +193,23 @@ body {
   flex-wrap: wrap;
   gap: 8px;
   align-items: center;
+  width: 100%;
+}
+
+.toolbar__editorActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-right: 10px;
+}
+
+.toolbar__nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-left: auto;
 }
 
 .toolbar__stats {
@@ -176,7 +223,7 @@ body {
   font-size: 11px;
   font-weight: 600;
   color: var(--accent-primary);
-  background: var(--accent-primary-subtle);
+  background: linear-gradient(135deg, var(--accent-primary-subtle) 0%, #f5f7ff 100%);
   padding: 6px 12px;
   border-radius: 999px;
   white-space: nowrap;
@@ -332,7 +379,7 @@ body {
 .pane {
   display: flex;
   flex-direction: column;
-  min-height: 560px;
+  min-height: min(560px, calc(100vh - 220px));
   border: 1px solid var(--border-light);
   border-radius: var(--radius-lg);
   overflow: hidden;
@@ -369,7 +416,7 @@ body {
 
 .monacoWrap {
   flex: 1;
-  min-height: 500px;
+  min-height: min(500px, calc(100vh - 260px));
 }
 
 /* ========== Preview Section ========== */
@@ -730,13 +777,18 @@ body {
 }
 
 @media (max-width: 768px) {
+  :root {
+    --toolbar-min-h: 108px;
+    --toolbar-pad-y: 12px;
+    --toolbar-pad-x: 14px;
+  }
+
   .appShell {
     padding: 12px;
     gap: 12px;
   }
 
-  .toolbar {
-    padding: 12px 14px;
+  .toolbar__inner {
     gap: 10px;
   }
 

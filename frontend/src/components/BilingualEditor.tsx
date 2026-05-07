@@ -1,6 +1,7 @@
 import Editor, { OnMount } from "@monaco-editor/react";
 import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { DualColumnPreview } from "./DualColumnPreview";
+import { EditorMainToolbar, type ScrollMode } from "./EditorMainToolbar";
 import { apiUrl } from "../utils/api";
 import { buildRowPairs } from "../utils/dualColumn";
 import { exportDomToPdf } from "../utils/exportPdf";
@@ -68,6 +69,40 @@ function toPage(page: "editor" | "preview" | "settings") {
   window.location.href = `${window.location.pathname}?page=${page}`;
 }
 
+type TranslateResult =
+  | { ok: true; translated: string; mock?: boolean }
+  | { ok: false; error: string };
+
+async function translateZhToEn(zhText: string): Promise<TranslateResult> {
+  if (!zhText.trim()) {
+    return { ok: false, error: "请先输入中文内容再翻译。" };
+  }
+  try {
+    const llm = loadLlmSettings();
+    const resp = await fetch(apiUrl("/api/translate"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        text: zhText,
+        llm: {
+          api_key: llm.apiKey,
+          base_url: llm.baseUrl,
+          model: llm.model,
+          force_mock: llm.forceMock,
+        },
+      }),
+    });
+    if (!resp.ok) {
+      const t = await resp.text();
+      return { ok: false, error: `请求失败(${resp.status}) ${t}` };
+    }
+    const data = (await resp.json()) as TranslateResponse;
+    return { ok: true, translated: data.translated ?? "", mock: data.mock };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 function getInitialTexts() {
   const fromPreview = loadPreviewPayload();
   if (fromPreview) {
@@ -88,8 +123,6 @@ function getInitialTexts() {
 }
 
 const SCROLL_MODE_KEY = "bilingual-editor-scroll-mode-v1";
-
-type ScrollMode = "independent" | "sync-line";
 
 export function BilingualEditor() {
   const initial = getInitialTexts();
@@ -246,40 +279,17 @@ export function BilingualEditor() {
   }
 
   async function runTranslate() {
-    if (!zhText.trim()) {
-      setError("请先输入中文内容再翻译。");
-      return;
-    }
     setBusy(true);
     setError("");
     setNotice("");
-    try {
-      const llm = loadLlmSettings();
-      const resp = await fetch(apiUrl("/api/translate"), {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          text: zhText,
-          llm: {
-            api_key: llm.apiKey,
-            base_url: llm.baseUrl,
-            model: llm.model,
-            force_mock: llm.forceMock,
-          },
-        }),
-      });
-      if (!resp.ok) {
-        const t = await resp.text();
-        throw new Error(`请求失败(${resp.status}) ${t}`);
-      }
-      const data = (await resp.json()) as TranslateResponse;
-      setEnText(data.translated ?? "");
-      setNotice(data.mock ? "翻译完成（当前为 Mock 模式）。" : "翻译完成。");
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setBusy(false);
+    const r = await translateZhToEn(zhText);
+    setBusy(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
     }
+    setEnText(r.translated);
+    setNotice(r.mock ? "翻译完成（当前为 Mock 模式）。" : "翻译完成。");
   }
 
   async function onExportPdf() {
@@ -299,68 +309,29 @@ export function BilingualEditor() {
 
   return (
     <div className="appShell">
-      <header className="toolbar toolbar--rich">
-        <div className="toolbar__title">
-          <strong>双栏中英编辑器</strong>
-          <span className="toolbar__hint">以中文段落为基准，对照英文段落段首对齐导出。</span>
-        </div>
-        <label className="toolbar__titleField">
-          <span>文档标题</span>
-          <input
-            type="text"
-            value={docTitle}
-            onChange={(e) => setDocTitle(e.target.value)}
-            placeholder={DEFAULT_DOC_TITLE}
-            spellCheck={false}
-          />
-        </label>
-        <div className="toolbar__stats">
-          <span className="toolbar__badge">对照块 {pairCount}</span>
-          <span className="toolbar__badge">本地图片 {localImages.size}</span>
-          <span className="toolbar__badge">最近同步 {isoToLocal(lastSyncAt)}</span>
-        </div>
-        <div className="toolbar__actions">
-          <button
-            className={`btn ${scrollMode === "sync-line" ? "btn--sync-active" : "btn--sync"}`}
-            onClick={() => setScrollMode((v) => v === "independent" ? "sync-line" : "independent")}
-            type="button"
-            title={
-              scrollMode === "sync-line"
-                ? "当前：行号同步滚动（点击切换为独立滚动）"
-                : "当前：独立滚动（点击切换为行号同步滚动）"
-            }
-          >
-            {scrollMode === "sync-line" ? "行号同步 ✓" : "独立滚动"}
-          </button>
-          <button className="btn btn--ghost" onClick={openPreviewPage} type="button">
-            预览页
-          </button>
-          <button className="btn btn--ghost" onClick={() => toPage("settings")} type="button">
-            API 配置页
-          </button>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept="image/*"
-            multiple
-            onChange={handleImageSelect}
-            style={{ display: "none" }}
-          />
-          <button
-            className="btn btn--accent"
-            onClick={() => fileInputRef.current?.click()}
-            type="button"
-          >
-            导入本地图片
-          </button>
-          <button className="btn btn--primary" disabled={busy} onClick={runTranslate} type="button">
-            {busy ? "翻译中..." : "LLM 翻译填充"}
-          </button>
-          <button className="btn" onClick={onExportPdf} type="button">
-            导出 PDF（双栏）
-          </button>
-        </div>
-      </header>
+      <EditorMainToolbar
+        docTitle={docTitle}
+        onDocTitleChange={setDocTitle}
+        pairCount={pairCount}
+        localImagesCount={localImages.size}
+        lastSyncDisplay={isoToLocal(lastSyncAt)}
+        scrollMode={scrollMode}
+        onToggleScrollMode={() =>
+          setScrollMode((v) => (v === "independent" ? "sync-line" : "independent"))
+        }
+        onGoEditor={() => toPage("editor")}
+        editorIsCurrentPage
+        busyTranslate={busy}
+        onTranslate={runTranslate}
+        onGoPreview={openPreviewPage}
+        previewIsCurrentPage={false}
+        onGoSettings={() => toPage("settings")}
+        settingsIsCurrentPage={false}
+        showEditorActions
+        fileInputRef={fileInputRef}
+        onImageFileChange={handleImageSelect}
+        onExportPdf={onExportPdf}
+      />
 
       {error ? (
         <div className="banner">
@@ -415,18 +386,68 @@ export function BilingualEditor() {
 
 export function PreviewPage() {
   const [payload, setPayload] = useState(() => loadPreviewPayload());
+  const [zhText, setZhText] = useState(() => loadPreviewPayload()?.zhText ?? "");
+  const [enText, setEnText] = useState(() => loadPreviewPayload()?.enText ?? "");
+  const [docTitle, setDocTitle] = useState(
+    () =>
+      loadPreviewPayload()?.title ??
+      localStorage.getItem(TITLE_STORAGE_KEY) ??
+      DEFAULT_DOC_TITLE,
+  );
+  const [lastSyncAt, setLastSyncAt] = useState(
+    () => loadPreviewPayload()?.updatedAt ?? new Date().toISOString(),
+  );
   const [localImages, setLocalImages] = useState<Map<string, string>>(() => loadLocalImages());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [scrollMode, setScrollMode] = useState<ScrollMode>(() => {
+    const stored = localStorage.getItem(SCROLL_MODE_KEY);
+    if (stored === "sync-line") return "sync-line";
+    return "independent";
+  });
 
-  const previewTitle = (payload?.title?.trim() || DEFAULT_DOC_TITLE);
+  const pdfCaptureRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const pairCount = useMemo(() => buildRowPairs(zhText, enText).length, [zhText, enText]);
 
   useEffect(() => {
-    document.title = previewTitle ? `${previewTitle} · 预览` : "双栏中英预览";
-  }, [previewTitle]);
+    const t = docTitle.trim();
+    document.title = t ? `${t} · 预览` : "双栏中英预览";
+  }, [docTitle]);
+
+  useEffect(() => {
+    if (!payload) return;
+    localStorage.setItem(ZH_STORAGE_KEY, zhText);
+    localStorage.setItem(EN_STORAGE_KEY, enText);
+    localStorage.setItem(TITLE_STORAGE_KEY, docTitle);
+    const now = new Date().toISOString();
+    setLastSyncAt(now);
+    savePreviewPayload({ zhText, enText, updatedAt: now, title: docTitle });
+  }, [zhText, enText, docTitle, payload]);
+
+  useEffect(() => {
+    saveLocalImages(localImages);
+  }, [localImages]);
+
+  useEffect(() => {
+    localStorage.setItem(SCROLL_MODE_KEY, scrollMode);
+  }, [scrollMode]);
 
   useEffect(() => {
     const onStorage = (evt: StorageEvent) => {
       if (evt.key === PREVIEW_STORAGE_KEY) {
-        setPayload(loadPreviewPayload());
+        const p = loadPreviewPayload();
+        setPayload(p);
+        if (p) {
+          setZhText(p.zhText);
+          setEnText(p.enText);
+          setDocTitle(
+            p.title ?? localStorage.getItem(TITLE_STORAGE_KEY) ?? DEFAULT_DOC_TITLE,
+          );
+          setLastSyncAt(p.updatedAt);
+        }
       }
       if (evt.key === LOCAL_IMAGES_KEY) {
         setLocalImages(loadLocalImages());
@@ -436,10 +457,75 @@ export function PreviewPage() {
     return () => window.removeEventListener("storage", onStorage);
   }, []);
 
-  const handleRefresh = useCallback(() => {
-    setPayload(loadPreviewPayload());
-    setLocalImages(loadLocalImages());
+  const handleImageSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    setError("");
+    const insertedKeys: string[] = [];
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (!file.type.startsWith("image/")) continue;
+        const base64 = await fileToBase64(file);
+        const imageKey = generateImageKey(file.name);
+        setLocalImages((prev) => {
+          const next = new Map(prev);
+          next.set(imageKey, base64);
+          return next;
+        });
+        insertedKeys.push(imageKey);
+      }
+      if (insertedKeys.length > 0) {
+        const markdown = insertedKeys
+          .map((key) => `![${key.split("-").pop() || "图片"}](${key})`)
+          .join("\n\n");
+        setZhText((z) => {
+          const base = z.replace(/\s*$/, "");
+          return base ? `${base}\n\n${markdown}\n` : `${markdown}\n`;
+        });
+        setNotice(`成功导入 ${insertedKeys.length} 张本地图片`);
+      }
+    } catch (err) {
+      setError(`图片导入失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
   }, []);
+
+  const runTranslate = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const r = await translateZhToEn(zhText);
+    setBusy(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    setEnText(r.translated);
+    setNotice(r.mock ? "翻译完成（当前为 Mock 模式）。" : "翻译完成。");
+  }, [zhText]);
+
+  const openPreviewPage = useCallback(() => {
+    const now = new Date().toISOString();
+    savePreviewPayload({ zhText, enText, updatedAt: now, title: docTitle });
+    setLastSyncAt(now);
+    toPage("preview");
+  }, [zhText, enText, docTitle]);
+
+  const onExportPdf = useCallback(async () => {
+    if (!pdfCaptureRef.current) return;
+    setError("");
+    try {
+      const exportWidth = pairCount > 48 ? 2100 : pairCount > 24 ? 1800 : 1500;
+      pdfCaptureRef.current.style.width = `${exportWidth}px`;
+      const safeName =
+        (docTitle.trim() || "bilingual-dual-column").replace(/[\\/:*?"<>|]/g, "_");
+      await exportDomToPdf(pdfCaptureRef.current, safeName, { rowCount: pairCount });
+      pdfCaptureRef.current.style.width = "";
+    } catch (e) {
+      setError(`导出 PDF 失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [pairCount, docTitle]);
 
   if (!payload) {
     return (
@@ -453,75 +539,240 @@ export function PreviewPage() {
 
   return (
     <div className="appShell appShell--preview">
-      <header className="toolbar toolbar--rich">
-        <div className="toolbar__title">
-          <strong>{previewTitle}</strong>
-          <span className="toolbar__hint">同站内独立页面预览，不使用浏览器弹窗。</span>
+      <EditorMainToolbar
+        docTitle={docTitle}
+        onDocTitleChange={setDocTitle}
+        pairCount={pairCount}
+        localImagesCount={localImages.size}
+        lastSyncDisplay={isoToLocal(lastSyncAt)}
+        scrollMode={scrollMode}
+        onToggleScrollMode={() =>
+          setScrollMode((v) => (v === "independent" ? "sync-line" : "independent"))
+        }
+        onGoEditor={() => toPage("editor")}
+        editorIsCurrentPage={false}
+        busyTranslate={busy}
+        onTranslate={runTranslate}
+        onGoPreview={openPreviewPage}
+        previewIsCurrentPage
+        onGoSettings={() => toPage("settings")}
+        settingsIsCurrentPage={false}
+        showEditorActions={false}
+        fileInputRef={fileInputRef}
+        onImageFileChange={handleImageSelect}
+        onExportPdf={onExportPdf}
+      />
+      {error ? (
+        <div className="banner">
+          <div className="banner__text">{error}</div>
         </div>
-        <div className="toolbar__stats">
-          <span className="toolbar__badge">对照块 {buildRowPairs(payload.zhText, payload.enText).length}</span>
-          <span className="toolbar__badge">本地图片 {localImages.size}</span>
-          <span className="toolbar__badge">最近更新 {isoToLocal(payload.updatedAt)}</span>
+      ) : null}
+      {notice ? (
+        <div className="banner banner--ok">
+          <div className="banner__text">{notice}</div>
         </div>
-        <div className="toolbar__actions">
-          <button className="btn btn--ghost" type="button" onClick={() => toPage("editor")}>
-            返回编辑
-          </button>
-          <button className="btn btn--ghost" type="button" onClick={() => toPage("settings")}>
-            API 配置页
-          </button>
-          <button className="btn" type="button" onClick={handleRefresh}>
-            立即刷新
-          </button>
-        </div>
-      </header>
+      ) : null}
 
       <section className="previewCard previewCard--full">
         <div className="pdfCaptureRoot">
-          <h1 className="pdfTitle">{previewTitle}</h1>
-          <p className="pdfMeta">更新时间：{isoToLocal(payload.updatedAt)}</p>
-          <DualColumnPreview zhText={payload.zhText} enText={payload.enText} localImages={localImages} />
+          <h1 className="pdfTitle">{docTitle.trim() || DEFAULT_DOC_TITLE}</h1>
+          <p className="pdfMeta">更新时间：{isoToLocal(lastSyncAt)}</p>
+          <DualColumnPreview zhText={zhText} enText={enText} localImages={localImages} />
         </div>
       </section>
+
+      <div className="pdfCaptureHost" aria-hidden="true">
+        <div className="pdfCaptureRoot" ref={pdfCaptureRef}>
+          <h1 className="pdfTitle">{docTitle.trim() || DEFAULT_DOC_TITLE}</h1>
+          <p className="pdfMeta">导出时间：{new Date().toLocaleString()}</p>
+          <DualColumnPreview zhText={zhText} enText={enText} localImages={localImages} />
+        </div>
+      </div>
     </div>
   );
 }
 
 export function SettingsPage() {
   const [settings, setSettings] = useState<LlmConfig>(() => loadLlmSettings());
-  const [savedAt, setSavedAt] = useState(new Date().toISOString());
+
+  const [zhText, setZhText] = useState(() => loadPreviewPayload()?.zhText ?? "");
+  const [enText, setEnText] = useState(() => loadPreviewPayload()?.enText ?? "");
+  const [docTitle, setDocTitle] = useState(
+    () =>
+      loadPreviewPayload()?.title ??
+      localStorage.getItem(TITLE_STORAGE_KEY) ??
+      DEFAULT_DOC_TITLE,
+  );
+  const [lastSyncAt, setLastSyncAt] = useState(
+    () => loadPreviewPayload()?.updatedAt ?? new Date().toISOString(),
+  );
+  const [localImages, setLocalImages] = useState<Map<string, string>>(() => loadLocalImages());
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [scrollMode, setScrollMode] = useState<ScrollMode>(() => {
+    const stored = localStorage.getItem(SCROLL_MODE_KEY);
+    if (stored === "sync-line") return "sync-line";
+    return "independent";
+  });
+
+  const pdfCaptureRef = useRef<HTMLDivElement | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+
+  const pairCount = useMemo(() => buildRowPairs(zhText, enText).length, [zhText, enText]);
 
   useEffect(() => {
     document.title = "LLM API 配置页";
   }, []);
 
-  function saveNow() {
+  useEffect(() => {
+    localStorage.setItem(ZH_STORAGE_KEY, zhText);
+    localStorage.setItem(EN_STORAGE_KEY, enText);
+    localStorage.setItem(TITLE_STORAGE_KEY, docTitle);
+    const now = new Date().toISOString();
+    setLastSyncAt(now);
+    savePreviewPayload({ zhText, enText, updatedAt: now, title: docTitle });
+  }, [zhText, enText, docTitle]);
+
+  useEffect(() => {
+    saveLocalImages(localImages);
+  }, [localImages]);
+
+  useEffect(() => {
+    localStorage.setItem(SCROLL_MODE_KEY, scrollMode);
+  }, [scrollMode]);
+
+  useEffect(() => {
+    const onStorage = (evt: StorageEvent) => {
+      if (evt.key === PREVIEW_STORAGE_KEY) {
+        const p = loadPreviewPayload();
+        if (p) {
+          setZhText(p.zhText);
+          setEnText(p.enText);
+          setDocTitle(
+            p.title ?? localStorage.getItem(TITLE_STORAGE_KEY) ?? DEFAULT_DOC_TITLE,
+          );
+          setLastSyncAt(p.updatedAt);
+        }
+      }
+      if (evt.key === LOCAL_IMAGES_KEY) {
+        setLocalImages(loadLocalImages());
+      }
+    };
+    window.addEventListener("storage", onStorage);
+    return () => window.removeEventListener("storage", onStorage);
+  }, []);
+
+  function saveApiSettings() {
     saveLlmSettings(settings);
-    setSavedAt(new Date().toISOString());
+    setNotice("API 配置已保存。");
   }
+
+  const handleImageSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+    setError("");
+    const insertedKeys: string[] = [];
+    try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        if (!file.type.startsWith("image/")) continue;
+        const base64 = await fileToBase64(file);
+        const imageKey = generateImageKey(file.name);
+        setLocalImages((prev) => {
+          const next = new Map(prev);
+          next.set(imageKey, base64);
+          return next;
+        });
+        insertedKeys.push(imageKey);
+      }
+      if (insertedKeys.length > 0) {
+        const markdown = insertedKeys
+          .map((key) => `![${key.split("-").pop() || "图片"}](${key})`)
+          .join("\n\n");
+        setZhText((z) => {
+          const base = z.replace(/\s*$/, "");
+          return base ? `${base}\n\n${markdown}\n` : `${markdown}\n`;
+        });
+        setNotice(`成功导入 ${insertedKeys.length} 张本地图片`);
+      }
+    } catch (err) {
+      setError(`图片导入失败：${err instanceof Error ? err.message : String(err)}`);
+    }
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }, []);
+
+  const runTranslate = useCallback(async () => {
+    setBusy(true);
+    setError("");
+    setNotice("");
+    const r = await translateZhToEn(zhText);
+    setBusy(false);
+    if (!r.ok) {
+      setError(r.error);
+      return;
+    }
+    setEnText(r.translated);
+    setNotice(r.mock ? "翻译完成（当前为 Mock 模式）。" : "翻译完成。");
+  }, [zhText]);
+
+  const openPreviewPage = useCallback(() => {
+    const now = new Date().toISOString();
+    savePreviewPayload({ zhText, enText, updatedAt: now, title: docTitle });
+    toPage("preview");
+  }, [zhText, enText, docTitle]);
+
+  const onExportPdf = useCallback(async () => {
+    if (!pdfCaptureRef.current) return;
+    setError("");
+    try {
+      const exportWidth = pairCount > 48 ? 2100 : pairCount > 24 ? 1800 : 1500;
+      pdfCaptureRef.current.style.width = `${exportWidth}px`;
+      const safeName =
+        (docTitle.trim() || "bilingual-dual-column").replace(/[\\/:*?"<>|]/g, "_");
+      await exportDomToPdf(pdfCaptureRef.current, safeName, { rowCount: pairCount });
+      pdfCaptureRef.current.style.width = "";
+    } catch (e) {
+      setError(`导出 PDF 失败：${e instanceof Error ? e.message : String(e)}`);
+    }
+  }, [pairCount, docTitle]);
 
   return (
     <div className="appShell appShell--settings">
-      <header className="toolbar toolbar--rich">
-        <div className="toolbar__title">
-          <strong>LLM API 配置页</strong>
-          <span className="toolbar__hint">独立页面维护 API Key / Base URL / Model，仅保存在本地浏览器。</span>
+      <EditorMainToolbar
+        docTitle={docTitle}
+        onDocTitleChange={setDocTitle}
+        pairCount={pairCount}
+        localImagesCount={localImages.size}
+        lastSyncDisplay={isoToLocal(lastSyncAt)}
+        scrollMode={scrollMode}
+        onToggleScrollMode={() =>
+          setScrollMode((v) => (v === "independent" ? "sync-line" : "independent"))
+        }
+        onGoEditor={() => toPage("editor")}
+        editorIsCurrentPage={false}
+        busyTranslate={busy}
+        onTranslate={runTranslate}
+        onGoPreview={openPreviewPage}
+        previewIsCurrentPage={false}
+        onGoSettings={() => toPage("settings")}
+        settingsIsCurrentPage
+        showEditorActions={false}
+        fileInputRef={fileInputRef}
+        onImageFileChange={handleImageSelect}
+        onExportPdf={onExportPdf}
+      />
+
+      {error ? (
+        <div className="banner">
+          <div className="banner__text">{error}</div>
         </div>
-        <div className="toolbar__stats">
-          <span className="toolbar__badge">最近保存 {isoToLocal(savedAt)}</span>
+      ) : null}
+      {notice ? (
+        <div className="banner banner--ok">
+          <div className="banner__text">{notice}</div>
         </div>
-        <div className="toolbar__actions">
-          <button className="btn btn--ghost" type="button" onClick={() => toPage("editor")}>
-            返回编辑
-          </button>
-          <button className="btn btn--ghost" type="button" onClick={() => toPage("preview")}>
-            预览页
-          </button>
-          <button className="btn btn--primary" type="button" onClick={saveNow}>
-            保存配置
-          </button>
-        </div>
-      </header>
+      ) : null}
 
       <section className="settingsCard">
         <label className="llmConfig__field">
@@ -562,7 +813,28 @@ export function SettingsPage() {
           />
           <span>强制 Mock（仅用于调试）</span>
         </label>
+
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "flex-end",
+            paddingTop: 8,
+            borderTop: "1px solid var(--border-light)",
+          }}
+        >
+          <button className="btn btn--primary" type="button" onClick={saveApiSettings}>
+            保存 API 配置
+          </button>
+        </div>
       </section>
+
+      <div className="pdfCaptureHost" aria-hidden="true">
+        <div className="pdfCaptureRoot" ref={pdfCaptureRef}>
+          <h1 className="pdfTitle">{docTitle.trim() || DEFAULT_DOC_TITLE}</h1>
+          <p className="pdfMeta">导出时间：{new Date().toLocaleString()}</p>
+          <DualColumnPreview zhText={zhText} enText={enText} localImages={localImages} />
+        </div>
+      </div>
     </div>
   );
 }
