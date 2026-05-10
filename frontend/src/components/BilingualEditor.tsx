@@ -1,5 +1,5 @@
 import Editor, { OnMount } from "@monaco-editor/react";
-import { useEffect, useMemo, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback, type ChangeEvent } from "react";
 import { DualColumnPreview } from "./DualColumnPreview";
 import { EditorMainToolbar, type ScrollMode } from "./EditorMainToolbar";
 import { apiUrl } from "../utils/api";
@@ -14,6 +14,25 @@ import {
   saveLlmSettings,
   savePreviewPayload,
 } from "../utils/previewBridge";
+import {
+  buildDraftDocument,
+  type DraftDocument,
+  downloadDraftFile,
+  draftToPreviewPayload,
+  idbLoadDraft,
+  idbLoadLinkedDraftHandle,
+  idbSaveDraft,
+  idbSaveLinkedDraftHandle,
+  isDraftEffectivelyEmpty,
+  isFileSystemAccessAvailable,
+  parseDraftJson,
+  persistDraftToLocalStorage,
+  pickOpenDraftFile,
+  pickSaveDraftFile,
+  previewPayloadToDraftShape,
+  readFileAsText,
+  writeDraftToFileHandle,
+} from "../utils/draftStorage";
 
 type TranslateResponse = {
   translated: string;
@@ -24,6 +43,15 @@ const ZH_STORAGE_KEY = "bilingual-editor-zh-v1";
 const EN_STORAGE_KEY = "bilingual-editor-en-v1";
 const TITLE_STORAGE_KEY = "bilingual-editor-title-v1";
 const LOCAL_IMAGES_KEY = "bilingual-editor-images-v1";
+const SCROLL_MODE_KEY = "bilingual-editor-scroll-mode-v1";
+
+const LS_DRAFT_KEYS = {
+  zh: ZH_STORAGE_KEY,
+  en: EN_STORAGE_KEY,
+  title: TITLE_STORAGE_KEY,
+  scroll: SCROLL_MODE_KEY,
+  images: LOCAL_IMAGES_KEY,
+} as const;
 
 function loadLocalImages(): Map<string, string> {
   try {
@@ -122,8 +150,6 @@ function getInitialTexts() {
   };
 }
 
-const SCROLL_MODE_KEY = "bilingual-editor-scroll-mode-v1";
-
 export function BilingualEditor() {
   const initial = getInitialTexts();
   const [zhText, setZhText] = useState(initial.zh);
@@ -139,15 +165,84 @@ export function BilingualEditor() {
     if (stored === "sync-line") return "sync-line";
     return "independent";
   });
+  /** 外部替换全文（草稿/IDB）时递增，强制 Monaco 重挂载，避免受控 value 整篇 replace 导致光标跑尾部 */
+  const [docSessionKey, setDocSessionKey] = useState(0);
 
   const zhEditorRef = useRef<any>(null);
   const enEditorRef = useRef<any>(null);
   const activePaneRef = useRef<"zh" | "en">("zh");
   const pdfCaptureRef = useRef<HTMLDivElement | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const draftFileInputRef = useRef<HTMLInputElement | null>(null);
+  const linkedLocalDraftHandleRef = useRef<FileSystemFileHandle | null>(null);
+  const [linkedLocalDraftName, setLinkedLocalDraftName] = useState<string | null>(null);
   const isScrollingSyncRef = useRef(false);
 
   const pairCount = useMemo(() => buildRowPairs(zhText, enText).length, [zhText, enText]);
+
+  useEffect(() => {
+    void idbLoadLinkedDraftHandle().then((h) => {
+      linkedLocalDraftHandleRef.current = h;
+      setLinkedLocalDraftName(h?.name ?? null);
+    });
+  }, []);
+
+  /** 启动时若 IndexedDB 自动保存比 localStorage 更新，则恢复（容量更大、可应对配额问题） */
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      const idbDraft = await idbLoadDraft();
+      if (cancelled || !idbDraft || isDraftEffectivelyEmpty(idbDraft)) return;
+
+      const preview = loadPreviewPayload();
+      const scrollStored = localStorage.getItem(SCROLL_MODE_KEY);
+      const scroll: ScrollMode = scrollStored === "sync-line" ? "sync-line" : "independent";
+      const imagesMap = loadLocalImages();
+      const fromLs = preview
+        ? previewPayloadToDraftShape(preview, scroll, imagesMap)
+        : buildDraftDocument({
+            title: localStorage.getItem(TITLE_STORAGE_KEY) ?? "",
+            zhText: localStorage.getItem(ZH_STORAGE_KEY) ?? "",
+            enText: localStorage.getItem(EN_STORAGE_KEY) ?? "",
+            scrollMode: scroll,
+            localImages: imagesMap,
+            updatedAt: new Date(0).toISOString(),
+          });
+
+      const tIdb = Date.parse(idbDraft.updatedAt);
+      const tLs = Date.parse(fromLs.updatedAt);
+      const idbIsNewer =
+        !Number.isFinite(tLs) || (Number.isFinite(tIdb) && tIdb >= tLs);
+
+      if (!idbIsNewer) return;
+
+      setZhText(idbDraft.zhText);
+      setEnText(idbDraft.enText);
+      setDocTitle(idbDraft.title.trim() ? idbDraft.title : DEFAULT_DOC_TITLE);
+      setScrollMode(idbDraft.scrollMode);
+      setLocalImages(new Map(Object.entries(idbDraft.localImages)));
+      setLastSyncAt(idbDraft.updatedAt);
+      persistDraftToLocalStorage(idbDraft, LS_DRAFT_KEYS);
+      setDocSessionKey((k) => k + 1);
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    const draft = buildDraftDocument({
+      title: docTitle,
+      zhText,
+      enText,
+      scrollMode,
+      localImages,
+    });
+    const t = window.setTimeout(() => {
+      void idbSaveDraft(draft);
+    }, 600);
+    return () => window.clearTimeout(t);
+  }, [zhText, enText, docTitle, scrollMode, localImages]);
 
   useEffect(() => {
     localStorage.setItem(ZH_STORAGE_KEY, zhText);
@@ -272,6 +367,178 @@ export function BilingualEditor() {
     }
   }, [insertAtActivePane]);
 
+  const applyDraftFromDocument = useCallback(async (d: DraftDocument, linkHandle: FileSystemFileHandle | null) => {
+    const now = new Date().toISOString();
+    const merged: DraftDocument = { ...d, updatedAt: now };
+    setZhText(merged.zhText);
+    setEnText(merged.enText);
+    setDocTitle(merged.title.trim() ? merged.title : DEFAULT_DOC_TITLE);
+    setScrollMode(merged.scrollMode);
+    setLocalImages(new Map(Object.entries(merged.localImages)));
+    setLastSyncAt(now);
+    setDocSessionKey((k) => k + 1);
+    persistDraftToLocalStorage(merged, LS_DRAFT_KEYS);
+    await idbSaveDraft(merged);
+    linkedLocalDraftHandleRef.current = linkHandle;
+    setLinkedLocalDraftName(linkHandle?.name ?? null);
+    await idbSaveLinkedDraftHandle(linkHandle);
+  }, []);
+
+  const handleClearLinkedLocalDraft = useCallback(() => {
+    setError("");
+    setNotice("");
+    linkedLocalDraftHandleRef.current = null;
+    setLinkedLocalDraftName(null);
+    void idbSaveLinkedDraftHandle(null);
+    setNotice("已解除与本地文件的关联。编辑内容仍在浏览器内自动保存；仍可「另存为」导出到本机。");
+  }, []);
+
+  const handleSaveDraft = useCallback(async () => {
+    setError("");
+    setNotice("");
+    const now = new Date().toISOString();
+    const d = buildDraftDocument({
+      title: docTitle,
+      zhText,
+      enText,
+      scrollMode,
+      localImages,
+      updatedAt: now,
+    });
+    try {
+      const linked = linkedLocalDraftHandleRef.current;
+      if (linked) {
+        await writeDraftToFileHandle(linked, d);
+        setLastSyncAt(d.updatedAt);
+        persistDraftToLocalStorage(d, LS_DRAFT_KEYS);
+        savePreviewPayload(draftToPreviewPayload(d));
+        await idbSaveDraft(d);
+        setNotice(`已写入本地文件「${linked.name}」。`);
+        return;
+      }
+      if (isFileSystemAccessAvailable()) {
+        const picked = await pickSaveDraftFile(docTitle.trim() || "draft");
+        if (!picked) {
+          setNotice("已取消保存。");
+          return;
+        }
+        await writeDraftToFileHandle(picked, d);
+        linkedLocalDraftHandleRef.current = picked;
+        setLinkedLocalDraftName(picked.name);
+        await idbSaveLinkedDraftHandle(picked);
+        setLastSyncAt(d.updatedAt);
+        persistDraftToLocalStorage(d, LS_DRAFT_KEYS);
+        savePreviewPayload(draftToPreviewPayload(d));
+        await idbSaveDraft(d);
+        setNotice(`已保存到「${picked.name}」。之后点「保存草稿」将直接覆盖此文件。`);
+        return;
+      }
+      downloadDraftFile(d, docTitle.trim() || "draft");
+      setNotice(
+        "已触发下载草稿。若使用 Chrome / Edge，可直接保存到固定路径并支持下次覆盖写入；当前浏览器将以下载方式导出。",
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(`保存草稿失败：${msg}`);
+      linkedLocalDraftHandleRef.current = null;
+      setLinkedLocalDraftName(null);
+      await idbSaveLinkedDraftHandle(null);
+    }
+  }, [docTitle, zhText, enText, scrollMode, localImages]);
+
+  const handleSaveDraftAs = useCallback(async () => {
+    setError("");
+    setNotice("");
+    const now = new Date().toISOString();
+    const d = buildDraftDocument({
+      title: docTitle,
+      zhText,
+      enText,
+      scrollMode,
+      localImages,
+      updatedAt: now,
+    });
+    try {
+      if (!isFileSystemAccessAvailable()) {
+        downloadDraftFile(d, docTitle.trim() || "draft");
+        setNotice("当前浏览器以下载方式另存草稿。");
+        return;
+      }
+      const picked = await pickSaveDraftFile(docTitle.trim() || "draft");
+      if (!picked) {
+        setNotice("已取消另存为。");
+        return;
+      }
+      await writeDraftToFileHandle(picked, d);
+      linkedLocalDraftHandleRef.current = picked;
+      setLinkedLocalDraftName(picked.name);
+      await idbSaveLinkedDraftHandle(picked);
+      setLastSyncAt(d.updatedAt);
+      persistDraftToLocalStorage(d, LS_DRAFT_KEYS);
+      savePreviewPayload(draftToPreviewPayload(d));
+      await idbSaveDraft(d);
+      setNotice(`已另存为「${picked.name}」，后续「保存草稿」将写入此文件。`);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setError(`另存为失败：${msg}`);
+      linkedLocalDraftHandleRef.current = null;
+      setLinkedLocalDraftName(null);
+      await idbSaveLinkedDraftHandle(null);
+    }
+  }, [docTitle, zhText, enText, scrollMode, localImages]);
+
+  const handleOpenDraftPick = useCallback(async () => {
+    setError("");
+    setNotice("");
+    if (isFileSystemAccessAvailable()) {
+      try {
+        const h = await pickOpenDraftFile();
+        if (!h) {
+          setNotice("已取消打开。");
+          return;
+        }
+        const file = await h.getFile();
+        const raw = await readFileAsText(file);
+        const d = parseDraftJson(raw);
+        if (!d) {
+          setError("无法识别草稿文件，请使用本应用保存的 .2ll-draft.json / JSON。");
+          return;
+        }
+        await applyDraftFromDocument(d, h);
+        setNotice(`已打开「${h.name}」，可继续编辑；保存时将写回此文件（若权限允许）。`);
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(`打开草稿失败：${msg}`);
+        return;
+      }
+    }
+    draftFileInputRef.current?.click();
+  }, [applyDraftFromDocument]);
+
+  const handleDraftFileChange = useCallback(
+    async (e: ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      if (!file) return;
+      setError("");
+      setNotice("");
+      try {
+        const raw = await readFileAsText(file);
+        const d = parseDraftJson(raw);
+        if (!d) {
+          setError("无法识别草稿文件，请使用本应用「保存草稿」生成的 JSON。");
+          return;
+        }
+        await applyDraftFromDocument(d, null);
+        setNotice("已从草稿文件恢复。当前浏览器未提供可写文件句柄，请用「另存为」导出到新文件以固定路径。");
+      } catch (err) {
+        setError(`导入草稿失败：${err instanceof Error ? err.message : String(err)}`);
+      }
+      if (draftFileInputRef.current) draftFileInputRef.current.value = "";
+    },
+    [applyDraftFromDocument],
+  );
+
   function openPreviewPage() {
     const now = new Date().toISOString();
     savePreviewPayload({ zhText, enText, updatedAt: now, title: docTitle });
@@ -282,13 +549,18 @@ export function BilingualEditor() {
     setBusy(true);
     setError("");
     setNotice("");
-    const r = await translateZhToEn(zhText);
+    const zhSource =
+      typeof zhEditorRef.current?.getValue === "function"
+        ? (zhEditorRef.current.getValue() as string)
+        : zhText;
+    const r = await translateZhToEn(zhSource);
     setBusy(false);
     if (!r.ok) {
       setError(r.error);
       return;
     }
     setEnText(r.translated);
+    enEditorRef.current?.setValue?.(r.translated);
     setNotice(r.mock ? "翻译完成（当前为 Mock 模式）。" : "翻译完成。");
   }
 
@@ -331,6 +603,13 @@ export function BilingualEditor() {
         fileInputRef={fileInputRef}
         onImageFileChange={handleImageSelect}
         onExportPdf={onExportPdf}
+        linkedLocalDraftName={linkedLocalDraftName}
+        onClearLinkedDraft={linkedLocalDraftName ? handleClearLinkedLocalDraft : undefined}
+        onSaveDraft={() => void handleSaveDraft()}
+        onSaveDraftAs={() => void handleSaveDraftAs()}
+        onOpenDraft={() => void handleOpenDraftPick()}
+        draftFileInputRef={draftFileInputRef}
+        onDraftFileChange={handleDraftFileChange}
       />
 
       {error ? (
@@ -349,7 +628,8 @@ export function BilingualEditor() {
           <div className="pane__head">中文（可编辑）</div>
           <div className="monacoWrap">
             <Editor
-              value={zhText}
+              key={`zh-${docSessionKey}`}
+              defaultValue={zhText}
               onChange={(v) => setZhText(v ?? "")}
               onMount={mountZh}
               language="markdown"
@@ -362,7 +642,8 @@ export function BilingualEditor() {
           <div className="pane__head">English（可编辑）</div>
           <div className="monacoWrap">
             <Editor
-              value={enText}
+              key={`en-${docSessionKey}`}
+              defaultValue={enText}
               onChange={(v) => setEnText(v ?? "")}
               onMount={mountEn}
               language="markdown"
@@ -434,6 +715,25 @@ export function PreviewPage() {
   useEffect(() => {
     localStorage.setItem(SCROLL_MODE_KEY, scrollMode);
   }, [scrollMode]);
+
+  useEffect(() => {
+    if (payload) return;
+    let cancelled = false;
+    void idbLoadDraft().then((d) => {
+      if (cancelled || !d || isDraftEffectivelyEmpty(d)) return;
+      persistDraftToLocalStorage(d, LS_DRAFT_KEYS);
+      setPayload(draftToPreviewPayload(d));
+      setZhText(d.zhText);
+      setEnText(d.enText);
+      setDocTitle(d.title.trim() ? d.title : DEFAULT_DOC_TITLE);
+      setLastSyncAt(d.updatedAt);
+      setLocalImages(new Map(Object.entries(d.localImages)));
+      setScrollMode(d.scrollMode);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [payload]);
 
   useEffect(() => {
     const onStorage = (evt: StorageEvent) => {
@@ -531,7 +831,10 @@ export function PreviewPage() {
     return (
       <div className="appShell">
         <div className="banner">
-          <div className="banner__text">未检测到可预览内容，请先在主编辑窗口输入文本。</div>
+          <div className="banner__text">
+            未在浏览器缓存中检测到预览数据。若曾在此设备上编辑，正在尝试从 IndexedDB
+            自动保存恢复；若仍无法显示，请返回编辑页或导入之前导出的草稿 JSON。
+          </div>
         </div>
       </div>
     );

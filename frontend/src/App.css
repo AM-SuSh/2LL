@@ -230,6 +230,14 @@ body {
   letter-spacing: 0.01em;
 }
 
+.toolbar__badge--file {
+  max-width: min(280px, 32vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--accent-success);
+  background: linear-gradient(135deg, #ecfdf5 0%, #f0fdf4 100%);
+}
+
 /* ========== Buttons ========== */
 .btn {
   appearance: none;

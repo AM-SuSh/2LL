@@ -1,0 +1,10 @@
+{
+  "name": "2ll",
+  "private": true,
+  "description": "仓库根目录：前端在 frontend/，后端在 backend/",
+  "scripts": {
+    "dev": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build",
+    "install:frontend": "npm --prefix frontend install"
+  }
+}
